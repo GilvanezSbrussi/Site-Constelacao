@@ -549,6 +549,8 @@ async function loadFaqs() {
 async function loadGallery() {
   const container = document.querySelector('[data-gallery-grid]');
   if (!container) return;
+  container.classList.remove('gallery-grid');
+  container.classList.add('gallery-groups');
   try {
     const response = await fetch(`${api}/gallery`, { headers: { Accept: 'application/json' } });
     if (!response.ok) return;

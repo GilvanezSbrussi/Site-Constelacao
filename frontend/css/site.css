@@ -508,6 +508,12 @@ img { display: block; max-width: 100%; }
   gap: 12px;
 }
 
+.gallery-groups {
+  display: grid;
+  min-width: 0;
+  gap: 16px;
+}
+
 .gallery-group + .gallery-group {
   margin-top: 20px;
 }
