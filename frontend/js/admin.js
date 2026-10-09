@@ -499,10 +499,11 @@ function addImageUpload(form, targetInput) {
     }
     const data = new FormData();
     data.append('file', file.files[0]);
+    data.append('category', 'image');
     upload.disabled = true;
     showFeedback(feedback, 'Enviando imagem...');
     try {
-      const result = await api('/admin/uploads', { method: 'POST', body: data });
+      const result = await api('/admin/library', { method: 'POST', body: data });
       targetInput.value = result.file.url;
       file.value = '';
       showFeedback(feedback, 'Imagem enviada e vinculada ao cadastro.');
@@ -515,8 +516,191 @@ function addImageUpload(form, targetInput) {
   const feedback = node('p', 'access-feedback');
   feedback.setAttribute('role', 'status');
   label.append(file);
-  wrapper.append(label, upload, feedback);
+  const picker = newButton('Selecionar da biblioteca', 'secondary-button', async () => {
+    picker.disabled = true;
+    showFeedback(feedback, 'Carregando imagens da biblioteca...');
+    try {
+      const result = await api('/admin/library?type=image');
+      if (!result.files.length) {
+        showFeedback(feedback, 'Ainda não há imagens na biblioteca. Envie uma imagem ou adicione arquivos na tela Biblioteca de arquivos.');
+        return;
+      }
+      const select = node('select');
+      select.setAttribute('aria-label', 'Imagem da biblioteca');
+      const placeholder = node('option', '', 'Selecione uma imagem');
+      placeholder.value = '';
+      select.append(placeholder);
+      for (const image of result.files) {
+        const option = node('option', '', image.original_name);
+        option.value = image.url;
+        select.append(option);
+      }
+      const useImage = newButton('Usar imagem selecionada', 'secondary-button', () => {
+        if (!select.value) {
+          showFeedback(feedback, 'Selecione uma imagem da lista.', true);
+          return;
+        }
+        targetInput.value = select.value;
+        showFeedback(feedback, 'Imagem da biblioteca vinculada ao cadastro.');
+      });
+      wrapper.querySelector('.library-image-picker')?.remove();
+      const pickerPanel = node('div', 'library-image-picker');
+      pickerPanel.append(select, useImage);
+      wrapper.append(pickerPanel);
+      showFeedback(feedback, `${result.files.length} imagem(ns) disponível(is).`);
+    } catch (error) {
+      showFeedback(feedback, error.message, true);
+    } finally {
+      picker.disabled = false;
+    }
+  });
+  wrapper.append(label, upload, picker, feedback);
   form.append(wrapper);
+}
+
+const mediaCategories = [
+  ['image', 'Imagens'],
+  ['video', 'Vídeos'],
+  ['document', 'Documentos'],
+  ['material', 'Materiais de curso'],
+];
+const mediaCategoryLabels = Object.fromEntries(mediaCategories);
+
+function formatFileSize(size) {
+  if (size < 1024) return `${size} bytes`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+async function loadLibrary() {
+  const heading = setHeading('Biblioteca de arquivos', 'Envie e reutilize imagens, vídeos, documentos e materiais.');
+  const uploadForm = node('form', 'editor-form library-upload-form');
+  const fileLabel = node('label');
+  fileLabel.append(document.createTextNode('Arquivo (JPEG, PNG, WebP, MP4, WebM, PDF ou TXT)'));
+  const fileInput = node('input');
+  fileInput.type = 'file';
+  fileInput.accept = 'image/jpeg,image/png,image/webp,video/mp4,video/webm,application/pdf,text/plain';
+  fileInput.required = true;
+  fileLabel.append(fileInput);
+  const categoryLabel = node('label');
+  categoryLabel.append(document.createTextNode('Categoria'));
+  const categorySelect = node('select');
+  for (const [value, label] of mediaCategories) {
+    const option = node('option', '', label);
+    option.value = value;
+    categorySelect.append(option);
+  }
+  categoryLabel.append(categorySelect);
+    fileInput.addEventListener('change', () => {
+      const category = fileInput.files[0]?.type.startsWith('image/') ? 'image'
+        : fileInput.files[0]?.type.startsWith('video/') ? 'video' : 'document';
+      categorySelect.value = category;
+    });
+  const formActions = node('div', 'editor-actions');
+  const uploadButton = node('button', 'admin-button button-primary', 'Enviar arquivo');
+  uploadButton.type = 'submit';
+  formActions.append(uploadButton);
+  uploadForm.append(fileLabel, categoryLabel, formActions);
+  uploadForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (!uploadForm.reportValidity()) return;
+    const data = new FormData();
+    data.append('file', fileInput.files[0]);
+    data.append('category', categorySelect.value);
+    uploadButton.disabled = true;
+    setNotice('Enviando arquivo...');
+    try {
+      await api('/admin/library', { method: 'POST', body: data });
+      await loadLibrary();
+      setNotice('Arquivo enviado para a biblioteca.');
+    } catch (error) {
+      uploadButton.disabled = false;
+      setNotice(error.message, true);
+    }
+  });
+
+  const filterRow = node('div', 'filter-row');
+  const search = node('input', 'filter-control');
+  search.type = 'search';
+  search.placeholder = 'Buscar por nome';
+  search.setAttribute('aria-label', 'Buscar arquivo por nome');
+  const categoryFilter = node('select', 'filter-control');
+  const allCategories = node('option', '', 'Todas as categorias');
+  allCategories.value = '';
+  categoryFilter.append(allCategories);
+  for (const [value, label] of mediaCategories) {
+    const option = node('option', '', label);
+    option.value = value;
+    categoryFilter.append(option);
+  }
+  filterRow.append(search, categoryFilter);
+
+  try {
+    const result = await api('/admin/library');
+    const grid = node('div', 'media-library-grid');
+    for (const file of result.files) {
+      const card = node('article', 'media-library-card');
+      if (file.mime_type.startsWith('image/')) {
+        const image = node('img', 'media-library-preview');
+        image.src = file.url;
+        image.alt = '';
+        image.loading = 'lazy';
+        card.append(image);
+      } else if (file.mime_type.startsWith('video/')) {
+        const video = node('video', 'media-library-preview');
+        video.src = file.url;
+        video.controls = true;
+        video.preload = 'metadata';
+        card.append(video);
+      } else {
+        card.append(node('div', 'media-library-document', file.mime_type === 'application/pdf' ? 'PDF' : 'TXT'));
+      }
+      const details = node('div', 'media-library-details');
+      details.append(
+        node('strong', '', file.original_name),
+        node('small', '', `${mediaCategoryLabels[file.category] || file.category} · ${formatFileSize(Number(file.size_bytes))}`),
+      );
+      const actions = node('div', 'table-actions');
+      const open = node('a', 'row-button', 'Abrir');
+      open.href = file.url;
+      open.target = '_blank';
+      open.rel = 'noreferrer';
+      const copy = newButton('Copiar link', 'row-button', async () => {
+        try {
+          await navigator.clipboard.writeText(new URL(file.url, location.href).href);
+          setNotice('Link do arquivo copiado.');
+        } catch (error) {
+          setNotice(`Não foi possível copiar o link: ${error.message}`, true);
+        }
+      });
+      actions.append(open, copy);
+      details.append(actions);
+      card.append(details);
+      card.dataset.name = file.original_name.toLocaleLowerCase('pt-BR');
+      card.dataset.category = file.category;
+      grid.append(card);
+    }
+    const empty = node('p', 'empty-state', 'Nenhum arquivo cadastrado ainda. Envie um arquivo para começar.');
+    empty.hidden = result.files.length > 0;
+    const filterCards = () => {
+      let visible = 0;
+      for (const card of grid.children) {
+        const matches = card.dataset.name.includes(search.value.trim().toLocaleLowerCase('pt-BR'))
+          && (!categoryFilter.value || card.dataset.category === categoryFilter.value);
+        card.hidden = !matches;
+        visible += Number(matches);
+      }
+      empty.textContent = result.files.length && !visible
+        ? 'Nenhum arquivo corresponde aos filtros.'
+        : 'Nenhum arquivo cadastrado ainda. Envie um arquivo para começar.';
+      empty.hidden = visible > 0;
+    };
+    search.addEventListener('input', filterCards);
+    categoryFilter.addEventListener('change', filterCards);
+    adminView.replaceChildren(heading, uploadForm, filterRow, grid, empty);
+  } catch (error) {
+    adminView.replaceChildren(heading, uploadForm, node('p', 'empty-state', error.message));
+  }
 }
 
 function activityForm(resource, activity) {
@@ -1537,6 +1721,8 @@ async function loadView(view) {
     await loadCourseCategoriesView();
   } else if (view === 'course-modules') {
     await loadCourseModulesView();
+  } else if (view === 'library') {
+    await loadLibrary();
   } else if (['blog', 'testimonials', 'faqs', 'gallery'].includes(view)) {
     await loadContent(view);
   } else if (view === 'settings') {

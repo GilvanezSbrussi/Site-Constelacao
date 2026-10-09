@@ -52,6 +52,8 @@ Cursos podem ser classificados por categorias e organizados em modulos numerados
 
 Na tela **Galeria**, cada foto pode ser associada a um nome de galeria (por exemplo, "Formacao 2026" ou "Workshop"). Varias fotos podem compartilhar o mesmo nome e sao exibidas agrupadas na pagina inicial. Fotos existentes sao mantidas na "Galeria geral" apos a migration `008_named_galleries.sql`.
 
+A **Biblioteca de arquivos** no painel organiza imagens, videos, documentos PDF/TXT e materiais de curso. Arquivos enviados podem ser consultados, filtrados, abertos e ter o link copiado; os campos de imagem de cursos, eventos, artigos, instrutores e galeria tambem podem reutilizar imagens da biblioteca. A migration `009_media_library.sql` registra os arquivos enviados. Limites por arquivo: 8 MB para imagens, 100 MB para videos e 20 MB para PDF/TXT.
+
 Novas inscricoes geram e-mails para o participante e para a equipe por meio de uma fila transacional com retentativas. As migrations `006_enrollment_notifications.sql` e `007_smtp_panel_settings.sql` criam a fila e as configuracoes SMTP. Servidor, porta, TLS, usuario, remetente e senha SMTP sao configurados pelo painel em **Configuracoes**. A senha e criptografada com AES-256-GCM usando `JWT_SECRET` como chave derivada; mantenha esse segredo estavel e protegido, pois troca-lo impede a leitura da senha SMTP armazenada. O destinatario administrativo e os assuntos e mensagens dos e-mails tambem podem ser alterados na tela **Configuracoes**; os modelos aceitam `{{name}}`, `{{email}}`, `{{phone}}`, `{{activity}}`, `{{type}}`, `{{date}}` e `{{siteName}}`. Sem SMTP ativo, as notificacoes ficam pendentes na fila.
 
 Exemplo para iniciar o administrador:

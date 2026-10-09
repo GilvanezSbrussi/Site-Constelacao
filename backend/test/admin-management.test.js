@@ -79,6 +79,93 @@ test('POST /api/v1/admin/uploads valida permissao e formato de imagem antes de s
   }
 });
 
+test('POST /api/v1/admin/library valida, registra e disponibiliza documentos PDF', async () => {
+  const uploadDir = await fs.mkdtemp(path.join(os.tmpdir(), 'constelacao-library-'));
+  const pdf = Buffer.from('%PDF-1.7\narquivo de teste\n%%EOF');
+  try {
+    const denied = makeApp({ uploadDir });
+    const unauthorized = await request(denied.app)
+      .post('/api/v1/admin/library')
+      .set('Authorization', `Bearer ${denied.token}`)
+      .attach('file', pdf, { filename: 'material.pdf', contentType: 'application/pdf' });
+    assert.equal(unauthorized.status, 403);
+
+    let insertedValues;
+    const { app, token } = makeApp({
+      permissions: ['content:manage'],
+      uploadDir,
+      queryHandler: async (sql, values) => {
+        if (!sql.includes('INSERT INTO media_files')) return { rows: [], rowCount: 0 };
+        insertedValues = values;
+        return {
+          rows: [{
+            id: 'media-id',
+            filename: values[0],
+            original_name: values[1],
+            mime_type: values[2],
+            category: values[3],
+            size_bytes: values[4],
+            created_at: '2026-10-09T12:00:00.000Z',
+          }],
+          rowCount: 1,
+        };
+      },
+    });
+    const uploaded = await request(app)
+      .post('/api/v1/admin/library')
+      .set('Authorization', `Bearer ${token}`)
+      .field('category', 'material')
+      .attach('file', pdf, { filename: 'material.pdf', contentType: 'application/pdf' });
+
+    assert.equal(uploaded.status, 201);
+    assert.equal(uploaded.body.file.original_name, 'material.pdf');
+    assert.equal(uploaded.body.file.category, 'material');
+    assert.equal(insertedValues[2], 'application/pdf');
+    assert.match(uploaded.body.file.url, /^\/uploads\/[a-f0-9]{32}\.pdf$/);
+
+    const served = await request(app).get(uploaded.body.file.url);
+    assert.equal(served.status, 200);
+    assert.deepEqual(served.body, pdf);
+  } finally {
+    await fs.rm(uploadDir, { recursive: true, force: true });
+  }
+});
+
+test('POST /api/v1/admin/library rejeita conteudo que nao corresponde ao MIME informado', async () => {
+  const uploadDir = await fs.mkdtemp(path.join(os.tmpdir(), 'constelacao-library-'));
+  try {
+    const { app, token } = makeApp({ permissions: ['content:manage'], uploadDir });
+    const response = await request(app)
+      .post('/api/v1/admin/library')
+      .set('Authorization', `Bearer ${token}`)
+      .attach('file', Buffer.from('<script>alert(1)</script>'), { filename: 'imagem.png', contentType: 'image/png' });
+    assert.equal(response.status, 400);
+    assert.deepEqual(await fs.readdir(uploadDir), []);
+  } finally {
+    await fs.rm(uploadDir, { recursive: true, force: true });
+  }
+});
+
+test('GET /api/v1/admin/library restringe o tipo e exige permissao de conteudo', async () => {
+  const denied = makeApp();
+  const unauthorized = await request(denied.app)
+    .get('/api/v1/admin/library')
+    .set('Authorization', `Bearer ${denied.token}`);
+  assert.equal(unauthorized.status, 403);
+
+  const { app, token } = makeApp({ permissions: ['content:manage'] });
+  const listed = await request(app)
+    .get('/api/v1/admin/library?type=image')
+    .set('Authorization', `Bearer ${token}`);
+  assert.equal(listed.status, 200);
+  assert.deepEqual(listed.body.files, []);
+
+  const invalidType = await request(app)
+    .get('/api/v1/admin/library?type=executable')
+    .set('Authorization', `Bearer ${token}`);
+  assert.equal(invalidType.status, 400);
+});
+
 test('POST /api/v1/admin/gallery aceita caminho seguro de imagem enviada', async () => {
   let savedValues;
   const { app, token } = makeApp({

@@ -7,6 +7,7 @@ const multer = require('multer');
 const { rateLimit } = require('express-rate-limit');
 const { z } = require('zod');
 const { createAuthenticate, createRequirePermission } = require('../middleware/auth');
+const { identifyMediaFile } = require('../services/media-files');
 const { encryptSmtpPassword } = require('../services/smtp-secrets');
 
 const idSchema = z.string().uuid();
@@ -130,6 +131,84 @@ function createAdminManagementRouter({ db, config }) {
     storage: multer.memoryStorage(),
     limits: { fileSize: 8 * 1024 * 1024, files: 1 },
   }).single('file');
+  const uploadMedia = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 100 * 1024 * 1024, files: 1 },
+  }).single('file');
+
+  router.post('/library', uploadLimiter, requirePermission('content:manage'), (request, response, next) => {
+    uploadMedia(request, response, (error) => {
+      if (!error) return next();
+      if (error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE') {
+        return response.status(413).json({ error: 'O arquivo deve ter no maximo 100 MB.' });
+      }
+      return response.status(400).json({ error: 'Envie um unico arquivo em formato aceito.' });
+    });
+  }, async (request, response, next) => {
+    if (!request.file) return response.status(400).json({ error: 'Selecione um arquivo para enviar.' });
+
+    const { buffer, mimetype, originalname } = request.file;
+    const format = identifyMediaFile(buffer, mimetype);
+    if (!format) {
+      return response.status(400).json({ error: 'Arquivo invalido ou formato nao aceito. Use JPEG, PNG, WebP, MP4, WebM, PDF ou TXT.' });
+    }
+    if (buffer.length > format.maxBytes) {
+      const maxMegabytes = format.maxBytes / (1024 * 1024);
+      return response.status(413).json({ error: `Arquivos deste formato devem ter no maximo ${maxMegabytes} MB.` });
+    }
+
+    const parsedCategory = z.enum(['image', 'video', 'document', 'material']).safeParse(request.body.category || format.category);
+    if (!parsedCategory.success) return response.status(400).json({ error: 'Categoria de arquivo invalida.' });
+    const safeOriginalName = path.basename(originalname.replace(/\\/g, '/'))
+      .replace(/[\u0000-\u001f\u007f]/g, '')
+      .slice(0, 255) || `arquivo.${format.extension}`;
+    const filename = `${crypto.randomBytes(16).toString('hex')}.${format.extension}`;
+    const uploadDir = path.resolve(config.uploadDir || path.resolve(__dirname, '../../uploads'));
+    const filePath = path.join(uploadDir, filename);
+
+    try {
+      await fs.mkdir(uploadDir, { recursive: true });
+      await fs.writeFile(filePath, buffer, { flag: 'wx', mode: 0o644 });
+      const result = await db.query(
+        `INSERT INTO media_files (filename, original_name, mime_type, category, size_bytes)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING id, filename, original_name, mime_type, category, size_bytes, created_at`,
+        [filename, safeOriginalName, format.mime, parsedCategory.data, buffer.length],
+      );
+      if (!result.rows[0]) throw new Error('O arquivo foi enviado, mas nao foi possivel registrar na biblioteca.');
+      return response.status(201).json({
+        file: { ...result.rows[0], url: `/uploads/${filename}` },
+      });
+    } catch (error) {
+      await fs.rm(filePath, { force: true }).catch((cleanupError) => {
+        console.error(`Falha ao remover arquivo sem registro: ${cleanupError.message}`);
+      });
+      return next(error);
+    }
+  });
+
+  router.get('/library', requirePermission('content:manage'), async (request, response, next) => {
+    const mediaType = request.query.type;
+    if (mediaType !== undefined && !['image', 'video', 'document'].includes(mediaType)) {
+      return response.status(400).json({ error: 'Tipo de arquivo invalido.' });
+    }
+    try {
+      const result = await db.query(
+        `SELECT id, filename, original_name, mime_type, category, size_bytes, created_at,
+                '/uploads/' || filename AS url
+         FROM media_files
+         WHERE ($1::text IS NULL
+           OR ($1 = 'image' AND mime_type LIKE 'image/%')
+           OR ($1 = 'video' AND mime_type LIKE 'video/%')
+           OR ($1 = 'document' AND mime_type NOT LIKE 'image/%' AND mime_type NOT LIKE 'video/%'))
+         ORDER BY created_at DESC`,
+        [mediaType || null],
+      );
+      return response.json({ files: result.rows });
+    } catch (error) {
+      return next(error);
+    }
+  });
 
   router.post('/uploads', uploadLimiter, requirePermission('content:manage'), (request, response, next) => {
     uploadImage(request, response, (error) => {
