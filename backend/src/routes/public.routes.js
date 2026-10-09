@@ -1,7 +1,15 @@
 const express = require('express');
+const crypto = require('node:crypto');
 const { rateLimit } = require('express-rate-limit');
 const { z } = require('zod');
 const { enqueueEnrollmentNotifications } = require('../services/enrollment-notifications');
+const { decryptPaymentSecret } = require('../services/mercado-pago-secrets');
+const {
+  createCheckoutPreference,
+  getPayment,
+  MercadoPagoError,
+  verifyWebhookSignature,
+} = require('../services/mercado-pago');
 
 const contactSchema = z.object({
   name: z.string().trim().min(2).max(120),
@@ -26,7 +34,7 @@ const enrollmentSchema = z.object({
   message: 'Informe um curso ou evento.',
 });
 
-function createPublicRouter({ db }) {
+function createPublicRouter({ db, config }) {
   const router = express.Router();
   const formLimiter = rateLimit({ windowMs: 60 * 60 * 1000, limit: 5 });
 
@@ -262,9 +270,61 @@ function createPublicRouter({ db }) {
     const targetTable = data.courseId ? 'courses' : 'events';
     const targetColumn = data.courseId ? 'course_id' : 'event_id';
     const targetId = data.courseId || data.eventId;
+    const enrollmentId = crypto.randomUUID();
+    let checkout = null;
     let client;
 
     try {
+      const activityResult = await db.query(
+        `SELECT id, title, starts_at, price_cents, promotional_price_cents
+         FROM ${targetTable} WHERE id = $1 AND status = 'enrollments_open'`,
+        [targetId],
+      );
+      if (!activityResult.rowCount) {
+        return response.status(409).json({ error: 'Inscricoes encerradas ou atividade indisponivel.' });
+      }
+      const activity = activityResult.rows[0];
+      const settingsResult = await db.query(
+        `SELECT key, value FROM site_settings
+         WHERE key IN ('site_name', 'contact_email', 'notification_admin_email',
+           'enrollment_admin_subject', 'enrollment_admin_message',
+           'enrollment_customer_subject', 'enrollment_customer_message',
+           'payment_enabled', 'payment_access_token_encrypted',
+           'payment_environment', 'payment_public_url', 'payment_max_installments')`,
+      );
+      const siteSettings = Object.fromEntries(settingsResult.rows.map(({ key, value }) => [key, value]));
+      const amountCents = activity.promotional_price_cents ?? activity.price_cents;
+      const paymentEnabled = Boolean(siteSettings.payment_enabled) && Number.isInteger(amountCents) && amountCents > 0;
+      let preference = null;
+      if (paymentEnabled) {
+        if (!config?.jwtSecret || !siteSettings.payment_access_token_encrypted || !siteSettings.payment_public_url) {
+          throw new MercadoPagoError('O pagamento online esta ativado, mas as credenciais ou a URL publica estao incompletas.');
+        }
+        const publicUrl = new URL(siteSettings.payment_public_url);
+        if (siteSettings.payment_environment === 'production' && publicUrl.protocol !== 'https:') {
+          throw new MercadoPagoError('A URL publica precisa usar HTTPS no ambiente de producao.');
+        }
+        const accessToken = decryptPaymentSecret(
+          siteSettings.payment_access_token_encrypted,
+          config.jwtSecret,
+          'access-token',
+        );
+        preference = await createCheckoutPreference({
+          accessToken,
+          environment: siteSettings.payment_environment || 'sandbox',
+          enrollment: {
+            id: enrollmentId,
+            name: data.name,
+            email: data.email.toLowerCase(),
+          },
+          activity,
+          amountCents,
+          publicSiteUrl: publicUrl.toString(),
+          maxInstallments: Number(siteSettings.payment_max_installments) || 1,
+          fetchImpl: config?.mercadoPagoFetchImpl,
+        });
+      }
+
       client = await db.connect();
       await client.query('BEGIN');
       const available = await client.query(
@@ -272,7 +332,7 @@ function createPublicRouter({ db }) {
          SET enrolled_count = enrolled_count + 1, updated_at = NOW()
          WHERE id = $1 AND status = 'enrollments_open'
            AND (available_spots IS NULL OR enrolled_count < available_spots)
-         RETURNING id, title, starts_at`,
+         RETURNING id, title, starts_at, price_cents, promotional_price_cents`,
         [targetId],
       );
 
@@ -280,33 +340,178 @@ function createPublicRouter({ db }) {
         await client.query('ROLLBACK');
         return response.status(409).json({ error: 'Inscricoes encerradas ou sem vagas.' });
       }
-
+      const reservedActivity = available.rows[0];
+      const reservedAmountCents = reservedActivity.promotional_price_cents ?? reservedActivity.price_cents;
+      if (reservedAmountCents !== amountCents) {
+        await client.query('ROLLBACK');
+        return response.status(409).json({ error: 'O valor da atividade foi atualizado. Recarregue a pagina e tente novamente.' });
+      }
+      const status = paymentEnabled ? 'awaiting_payment' : 'new';
       const result = await client.query(
         `INSERT INTO enrollments
-           (${targetColumn}, name, email, phone, city, state, observations, privacy_consent)
-         VALUES ($1, $2, LOWER($3), $4, NULLIF($5, ''), NULLIF($6, ''), NULLIF($7, ''), $8)
+           (id, ${targetColumn}, name, email, phone, city, state, observations, privacy_consent, status)
+         VALUES ($1, $2, $3, LOWER($4), $5, NULLIF($6, ''), NULLIF($7, ''), NULLIF($8, ''), $9, $10)
          RETURNING id, status`,
-        [targetId, data.name, data.email, data.phone, data.city, data.state.toUpperCase(), data.observations, data.privacyConsent],
+        [enrollmentId, targetId, data.name, data.email, data.phone, data.city, data.state.toUpperCase(), data.observations, data.privacyConsent, status],
       );
-      const settingsResult = await client.query(
-        `SELECT key, value FROM site_settings
-         WHERE key IN ('site_name', 'contact_email', 'notification_admin_email',
-           'enrollment_admin_subject', 'enrollment_admin_message',
-           'enrollment_customer_subject', 'enrollment_customer_message')`,
-      );
-      const siteSettings = Object.fromEntries(settingsResult.rows.map(({ key, value }) => [key, value]));
+      if (paymentEnabled) {
+        await client.query(
+          `INSERT INTO enrollment_payments (enrollment_id, preference_id, checkout_url, amount_cents)
+           VALUES ($1, $2, $3, $4)`,
+          [result.rows[0].id, preference.preferenceId, preference.checkoutUrl, amountCents],
+        );
+        checkout = { url: preference.checkoutUrl };
+      }
       await enqueueEnrollmentNotifications(client, {
         ...data,
         email: data.email.toLowerCase(),
         courseId: data.courseId,
-      }, available.rows[0], siteSettings);
+      }, reservedActivity, siteSettings);
       await client.query('COMMIT');
-      return response.status(201).json({ enrollment: result.rows[0] });
+      return response.status(201).json({
+        enrollment: result.rows[0],
+        ...(checkout ? { payment: checkout } : {}),
+      });
     } catch (error) {
       if (client) await client.query('ROLLBACK');
+      if (error instanceof MercadoPagoError) {
+        return response.status(502).json({ error: `Nao foi possivel iniciar o pagamento: ${error.message}` });
+      }
       return next(error);
     } finally {
       client?.release();
+    }
+  });
+
+  router.get('/payments/:enrollmentId/status', async (request, response, next) => {
+    if (!z.string().uuid().safeParse(request.params.enrollmentId).success) {
+      return response.status(400).json({ error: 'Identificador de inscricao invalido.' });
+    }
+    try {
+      const result = await db.query(
+        `SELECT status, amount_cents, currency, checkout_url
+         FROM enrollment_payments WHERE enrollment_id = $1`,
+        [request.params.enrollmentId],
+      );
+      if (!result.rowCount) return response.status(404).json({ error: 'Pagamento nao encontrado.' });
+      return response.json({ payment: result.rows[0] });
+    } catch (error) {
+      return next(error);
+    }
+  });
+
+  router.post('/payments/webhook', async (request, response, next) => {
+    const eventType = request.query.type || request.body?.type || request.body?.topic;
+    if (eventType !== 'payment') return response.sendStatus(200);
+    const paymentId = String(request.query['data.id'] || request.body?.data?.id || '');
+    if (!/^\d{1,30}$/.test(paymentId)) return response.status(400).json({ error: 'Evento de pagamento invalido.' });
+
+    try {
+      const secretResult = await db.query(
+        "SELECT value FROM site_settings WHERE key = 'payment_webhook_secret_encrypted'",
+      );
+      const encryptedSecret = secretResult.rows[0]?.value;
+      if (!encryptedSecret || !config?.jwtSecret) {
+        return response.status(503).json({ error: 'Webhook de pagamento nao configurado.' });
+      }
+      const secret = decryptPaymentSecret(encryptedSecret, config.jwtSecret, 'webhook-secret');
+      const signatureValid = verifyWebhookSignature({
+        signature: request.get('x-signature'),
+        requestId: request.get('x-request-id'),
+        paymentId,
+        secret,
+      });
+      if (!signatureValid) return response.status(401).json({ error: 'Assinatura do webhook invalida.' });
+
+      const settings = await db.query(
+        "SELECT value FROM site_settings WHERE key = 'payment_access_token_encrypted'",
+      );
+      const encryptedToken = settings.rows[0]?.value;
+      if (!encryptedToken) return response.status(503).json({ error: 'Acesso ao Mercado Pago nao configurado.' });
+      const payment = await getPayment({
+        accessToken: decryptPaymentSecret(encryptedToken, config.jwtSecret, 'access-token'),
+        paymentId,
+        fetchImpl: config?.mercadoPagoFetchImpl,
+      });
+      if (String(payment.id) !== paymentId) {
+        return response.status(400).json({ error: 'Identificador do pagamento nao corresponde ao evento.' });
+      }
+      const enrollmentId = payment.external_reference;
+      if (!z.string().uuid().safeParse(enrollmentId).success || payment.currency_id !== 'BRL') {
+        return response.status(400).json({ error: 'Pagamento nao corresponde a uma inscricao valida.' });
+      }
+
+      const status = {
+        approved: 'approved',
+        rejected: 'rejected',
+        cancelled: 'cancelled',
+        refunded: 'refunded',
+        charged_back: 'charged_back',
+      }[payment.status] || 'pending';
+      let client;
+      try {
+        client = await db.connect();
+        await client.query('BEGIN');
+        const enrollmentPayment = await client.query(
+          `SELECT ep.amount_cents, ep.status, ep.provider_payment_id, en.status AS enrollment_status
+           FROM enrollment_payments ep
+           JOIN enrollments en ON en.id = ep.enrollment_id
+           WHERE ep.enrollment_id = $1
+           FOR UPDATE OF ep, en`,
+          [enrollmentId],
+        );
+        if (!enrollmentPayment.rowCount) {
+          await client.query('ROLLBACK');
+          return response.status(404).json({ error: 'Inscricao de pagamento nao encontrada.' });
+        }
+        const amountCents = Number(enrollmentPayment.rows[0].amount_cents);
+        const paidAmountCents = Number(payment.transaction_amount) * 100;
+        if (!Number.isFinite(paidAmountCents) || Math.round(paidAmountCents) !== amountCents) {
+          await client.query('ROLLBACK');
+          return response.status(400).json({ error: 'O valor do pagamento nao corresponde a inscricao.' });
+        }
+        const attempt = await client.query(
+          `INSERT INTO enrollment_payment_attempts
+             (enrollment_id, provider_payment_id, amount_cents, status, provider_status, updated_at)
+           VALUES ($1, $2, $3, $4, $5, NOW())
+           ON CONFLICT (provider_payment_id) DO UPDATE
+           SET status = EXCLUDED.status, provider_status = EXCLUDED.provider_status, updated_at = NOW()
+           WHERE enrollment_payment_attempts.enrollment_id = EXCLUDED.enrollment_id
+             AND enrollment_payment_attempts.amount_cents = EXCLUDED.amount_cents`,
+          [enrollmentId, paymentId, amountCents, status, String(payment.status || '').slice(0, 40)],
+        );
+        if (!attempt.rowCount) {
+          await client.query('ROLLBACK');
+          return response.status(409).json({ error: 'O pagamento ja esta vinculado a outra inscricao ou valor.' });
+        }
+        const isCurrentPayment = enrollmentPayment.rows[0].provider_payment_id === paymentId;
+        const canReplacePaymentStatus = ['pending', 'rejected', 'cancelled'].includes(enrollmentPayment.rows[0].status);
+        if (status !== 'approved' && !isCurrentPayment && !canReplacePaymentStatus) {
+          await client.query('COMMIT');
+          return response.sendStatus(200);
+        }
+        await client.query(
+          `UPDATE enrollment_payments
+           SET provider_payment_id = $1, status = $2, provider_status = $3, updated_at = NOW()
+           WHERE enrollment_id = $4`,
+          [String(payment.id), status, String(payment.status || '').slice(0, 40), enrollmentId],
+        );
+        if (status === 'approved' && enrollmentPayment.rows[0].enrollment_status !== 'cancelled') {
+          await client.query(
+            "UPDATE enrollments SET status = 'confirmed' WHERE id = $1",
+            [enrollmentId],
+          );
+        }
+        await client.query('COMMIT');
+        return response.sendStatus(200);
+      } catch (error) {
+        if (client) await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client?.release();
+      }
+    } catch (error) {
+      return next(error);
     }
   });
 

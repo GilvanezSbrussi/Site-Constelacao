@@ -8,6 +8,7 @@ const { rateLimit } = require('express-rate-limit');
 const { z } = require('zod');
 const { createAuthenticate, createRequirePermission } = require('../middleware/auth');
 const { identifyMediaFile } = require('../services/media-files');
+const { encryptPaymentSecret } = require('../services/mercado-pago-secrets');
 const { encryptSmtpPassword } = require('../services/smtp-secrets');
 
 const idSchema = z.string().uuid();
@@ -61,6 +62,20 @@ const settingsFields = {
   smtpSecure: z.boolean(),
   smtpUser: z.string().trim().max(254),
   smtpFrom: emailOrEmpty,
+  paymentEnabled: z.boolean(),
+  paymentEnvironment: z.enum(['sandbox', 'production']),
+  paymentPublicUrl: z.string().trim().max(2000).refine((value) => {
+    if (!value) return true;
+    try {
+      return ['http:', 'https:'].includes(new URL(value).protocol);
+    } catch {
+      return false;
+    }
+  }),
+  paymentMaxInstallments: z.preprocess(
+    (value) => value === '' ? undefined : typeof value === 'string' ? Number(value) : value,
+    z.number().int().min(1).max(12).optional(),
+  ),
   phone: z.string().trim().max(30),
   whatsappNumber: z.string().trim().max(30),
   whatsappMessage: z.string().trim().max(300),
@@ -251,7 +266,11 @@ function createAdminManagementRouter({ db, config }) {
         value,
       ]));
       settings.smtpPasswordConfigured = Boolean(settings.smtpPasswordEncrypted);
+      settings.mercadoPagoAccessTokenConfigured = Boolean(settings.paymentAccessTokenEncrypted);
+      settings.mercadoPagoWebhookSecretConfigured = Boolean(settings.paymentWebhookSecretEncrypted);
       delete settings.smtpPasswordEncrypted;
+      delete settings.paymentAccessTokenEncrypted;
+      delete settings.paymentWebhookSecretEncrypted;
       return response.json({ settings });
     } catch (error) {
       return next(error);
@@ -267,10 +286,22 @@ function createAdminManagementRouter({ db, config }) {
     }
     const smtpPassword = basicSettings.smtpPassword;
     delete basicSettings.smtpPassword;
+    const mercadoPagoAccessToken = basicSettings.mercadoPagoAccessToken;
+    const mercadoPagoWebhookSecret = basicSettings.mercadoPagoWebhookSecret;
+    delete basicSettings.mercadoPagoAccessToken;
+    delete basicSettings.mercadoPagoWebhookSecret;
     const passwordParsed = smtpPassword === undefined
       ? { success: true, data: undefined }
       : z.string().max(512).safeParse(smtpPassword);
     if (!passwordParsed.success) return respondInvalid(response, 'A senha SMTP informada e invalida.', passwordParsed);
+    const accessTokenParsed = mercadoPagoAccessToken === undefined
+      ? { success: true, data: undefined }
+      : z.string().trim().max(512).safeParse(mercadoPagoAccessToken);
+    if (!accessTokenParsed.success) return respondInvalid(response, 'O token do Mercado Pago informado e invalido.', accessTokenParsed);
+    const webhookSecretParsed = mercadoPagoWebhookSecret === undefined
+      ? { success: true, data: undefined }
+      : z.string().trim().max(512).safeParse(mercadoPagoWebhookSecret);
+    if (!webhookSecretParsed.success) return respondInvalid(response, 'A chave de assinatura do webhook e invalida.', webhookSecretParsed);
     const basicParsed = Object.keys(basicSettings).length
       ? settingsSchema.safeParse(basicSettings)
       : { success: true, data: {} };
@@ -280,6 +311,7 @@ function createAdminManagementRouter({ db, config }) {
     const parsedSettings = { ...basicParsed.data, ...structuredParsed.data };
     const settingsToSave = { ...parsedSettings };
     delete settingsToSave.smtpPort;
+    delete settingsToSave.paymentMaxInstallments;
     const valuesToSave = { ...settingsToSave };
 
     let client;
@@ -299,6 +331,30 @@ function createAdminManagementRouter({ db, config }) {
           return response.status(400).json({ error: 'Informe servidor, porta, usuário e remetente SMTP antes de ativar o envio.' });
         }
       }
+      if (parsedSettings.paymentEnabled) {
+        const existingPaymentSecrets = await client.query(
+          `SELECT key, value FROM site_settings
+           WHERE key IN ('payment_access_token_encrypted', 'payment_webhook_secret_encrypted')`,
+        );
+        const configured = Object.fromEntries(existingPaymentSecrets.rows.map(({ key, value }) => [key, value]));
+        if (!(accessTokenParsed.data || configured.payment_access_token_encrypted)) {
+          await client.query('ROLLBACK');
+          return response.status(400).json({ error: 'Informe o token de acesso do Mercado Pago antes de ativar os pagamentos.' });
+        }
+        if (!(webhookSecretParsed.data || configured.payment_webhook_secret_encrypted)) {
+          await client.query('ROLLBACK');
+          return response.status(400).json({ error: 'Informe a chave de assinatura do webhook antes de ativar os pagamentos.' });
+        }
+        if (!parsedSettings.paymentEnvironment || !parsedSettings.paymentPublicUrl) {
+          await client.query('ROLLBACK');
+          return response.status(400).json({ error: 'Informe o ambiente e a URL publica antes de ativar os pagamentos.' });
+        }
+        const publicUrl = new URL(parsedSettings.paymentPublicUrl);
+        if (parsedSettings.paymentEnvironment === 'production' && publicUrl.protocol !== 'https:') {
+          await client.query('ROLLBACK');
+          return response.status(400).json({ error: 'O ambiente de producao exige uma URL publica HTTPS.' });
+        }
+      }
       for (const [field, value] of Object.entries(valuesToSave)) {
         await client.query(
           `INSERT INTO site_settings (key, value, updated_at)
@@ -315,6 +371,14 @@ function createAdminManagementRouter({ db, config }) {
           [JSON.stringify(parsedSettings.smtpPort)],
         );
       }
+      if (parsedSettings.paymentMaxInstallments !== undefined) {
+        await client.query(
+          `INSERT INTO site_settings (key, value, updated_at)
+           VALUES ('payment_max_installments', $1::jsonb, NOW())
+           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+          [JSON.stringify(parsedSettings.paymentMaxInstallments)],
+        );
+      }
       if (passwordParsed.data) {
         await client.query(
           `INSERT INTO site_settings (key, value, updated_at)
@@ -323,8 +387,31 @@ function createAdminManagementRouter({ db, config }) {
           [JSON.stringify(encryptSmtpPassword(passwordParsed.data, config.jwtSecret))],
         );
       }
+      if (accessTokenParsed.data) {
+        await client.query(
+          `INSERT INTO site_settings (key, value, updated_at)
+           VALUES ('payment_access_token_encrypted', $1::jsonb, NOW())
+           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+          [JSON.stringify(encryptPaymentSecret(accessTokenParsed.data, config.jwtSecret, 'access-token'))],
+        );
+      }
+      if (webhookSecretParsed.data) {
+        await client.query(
+          `INSERT INTO site_settings (key, value, updated_at)
+           VALUES ('payment_webhook_secret_encrypted', $1::jsonb, NOW())
+           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+          [JSON.stringify(encryptPaymentSecret(webhookSecretParsed.data, config.jwtSecret, 'webhook-secret'))],
+        );
+      }
       await client.query('COMMIT');
-      return response.json({ saved: Object.keys(valuesToSave).length + Number(parsedSettings.smtpPort !== undefined) + Number(Boolean(passwordParsed.data)) });
+      return response.json({
+        saved: Object.keys(valuesToSave).length
+          + Number(parsedSettings.smtpPort !== undefined)
+          + Number(parsedSettings.paymentMaxInstallments !== undefined)
+          + Number(Boolean(passwordParsed.data))
+          + Number(Boolean(accessTokenParsed.data))
+          + Number(Boolean(webhookSecretParsed.data)),
+      });
     } catch (error) {
       if (client) await client.query('ROLLBACK');
       return next(error);

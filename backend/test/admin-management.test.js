@@ -6,6 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const request = require('supertest');
 const { createApp } = require('../src/app');
+const { decryptPaymentSecret } = require('../src/services/mercado-pago-secrets');
 const { decryptSmtpPassword } = require('../src/services/smtp-secrets');
 
 const secret = 'test-secret-with-at-least-thirty-two-characters';
@@ -216,6 +217,75 @@ test('GET /api/v1/admin/settings devolve valores editaveis para admin', async ()
   assert.equal(response.body.settings.smtpPasswordConfigured, true);
   assert.equal(response.body.settings.smtpPasswordEncrypted, undefined);
   assert.equal(JSON.stringify(response.body).includes('ciphertext-secret'), false);
+});
+
+test('GET /api/v1/admin/settings nunca devolve credenciais do Mercado Pago', async () => {
+  const { app, token } = makeApp({
+    permissions: ['settings:manage'],
+    queryHandler: async () => ({
+      rows: [
+        { key: 'payment_enabled', value: true },
+        { key: 'payment_access_token_encrypted', value: 'encrypted-access-token' },
+        { key: 'payment_webhook_secret_encrypted', value: 'encrypted-webhook-secret' },
+      ],
+      rowCount: 3,
+    }),
+  });
+  const response = await request(app).get('/api/v1/admin/settings').set('Authorization', `Bearer ${token}`);
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.settings.paymentEnabled, true);
+  assert.equal(response.body.settings.mercadoPagoAccessTokenConfigured, true);
+  assert.equal(response.body.settings.mercadoPagoWebhookSecretConfigured, true);
+  assert.equal(response.body.settings.paymentAccessTokenEncrypted, undefined);
+  assert.equal(response.body.settings.paymentWebhookSecretEncrypted, undefined);
+  assert.doesNotMatch(response.text, /encrypted-access-token|encrypted-webhook-secret/);
+});
+
+test('PUT /api/v1/admin/settings criptografa credenciais e exige webhook HTTPS para producao', async () => {
+  const writes = [];
+  const { app, token } = makeApp({
+    permissions: ['settings:manage'],
+    connectHandler: () => ({
+      async query(sql, values) {
+        if (sql.includes('INSERT INTO site_settings')) writes.push({ sql, values });
+        if (sql.includes("key IN ('payment_access_token_encrypted'")) return { rows: [], rowCount: 0 };
+        return { rows: [], rowCount: 1 };
+      },
+      release() {},
+    }),
+  });
+  const response = await request(app)
+    .put('/api/v1/admin/settings')
+    .set('Authorization', `Bearer ${token}`)
+    .send({
+      paymentEnabled: true,
+      paymentEnvironment: 'sandbox',
+      paymentPublicUrl: 'http://localhost:3000',
+      paymentMaxInstallments: '3',
+      mercadoPagoAccessToken: 'TEST-access-token',
+      mercadoPagoWebhookSecret: 'test-webhook-secret',
+    });
+  const tokenWrite = writes.find(({ sql }) => sql.includes("'payment_access_token_encrypted'"));
+  const webhookWrite = writes.find(({ sql }) => sql.includes("'payment_webhook_secret_encrypted'"));
+  const insecureProduction = await request(app)
+    .put('/api/v1/admin/settings')
+    .set('Authorization', `Bearer ${token}`)
+    .send({
+      paymentEnabled: true,
+      paymentEnvironment: 'production',
+      paymentPublicUrl: 'http://example.com',
+      mercadoPagoAccessToken: 'TEST-access-token',
+      mercadoPagoWebhookSecret: 'test-webhook-secret',
+    });
+
+  assert.equal(response.status, 200, response.text);
+  assert.ok(tokenWrite);
+  assert.ok(webhookWrite);
+  assert.equal(decryptPaymentSecret(JSON.parse(tokenWrite.values[0]), secret, 'access-token'), 'TEST-access-token');
+  assert.equal(decryptPaymentSecret(JSON.parse(webhookWrite.values[0]), secret, 'webhook-secret'), 'test-webhook-secret');
+  assert.equal(insecureProduction.status, 400);
+  assert.match(insecureProduction.body.error, /HTTPS/);
 });
 
 test('PUT /api/v1/admin/settings criptografa senha SMTP e valida configuracao antes de ativar', async () => {

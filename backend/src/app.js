@@ -44,7 +44,7 @@ function createApp({ db, config }) {
 
   app.get('/api/v1/health', (request, response) => response.json({ status: 'ok', service: 'api' }));
   app.use('/api/v1/auth', createAuthRouter({ db, config }));
-  app.use('/api/v1', createPublicRouter({ db }));
+  app.use('/api/v1', createPublicRouter({ db, config }));
   app.use('/api/v1/admin', createAdminRouter({ db, config }));
   app.use('/api/v1/admin', createAdminManagementRouter({ db, config }));
   app.use('/uploads', express.static(config.uploadDir || path.resolve(__dirname, '../../uploads'), {

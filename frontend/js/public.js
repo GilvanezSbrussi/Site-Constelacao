@@ -441,6 +441,11 @@ async function setupEnrollmentForm(form) {
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || 'Não foi possível concluir a inscrição.');
+      if (result.payment?.url) {
+        showFeedback(feedback, 'Inscrição registrada. Redirecionando para o pagamento seguro...');
+        location.assign(result.payment.url);
+        return;
+      }
       form.reset();
       showFeedback(feedback, 'Recebemos sua inscrição. Em breve entraremos em contato.');
     } catch (error) {
@@ -449,6 +454,68 @@ async function setupEnrollmentForm(form) {
       button.disabled = false;
     }
   });
+}
+
+async function loadPaymentReturn() {
+  const container = document.querySelector('[data-payment-return]');
+  if (!container) return;
+  const parameters = new URLSearchParams(location.search);
+  const enrollmentId = parameters.get('enrollment');
+  const initialStatus = parameters.get('status');
+  container.replaceChildren();
+  addText(container, 'p', 'eyebrow', 'Retorno do pagamento');
+  addText(container, 'h1', '', 'Pagamento da inscrição');
+  const message = addText(container, 'p', 'detail-lead', 'Consultando a confirmação segura do pagamento...');
+  if (!enrollmentId) {
+    message.textContent = 'Não foi possível identificar a inscrição. Entre em contato com a equipe para confirmar seu pagamento.';
+    message.classList.add('form-feedback', 'is-error');
+    return;
+  }
+
+  const statusMessages = {
+    approved: 'Pagamento aprovado. Sua inscrição está confirmada.',
+    rejected: 'O pagamento não foi aprovado. Você pode tentar novamente no checkout ou falar com a equipe.',
+    cancelled: 'O pagamento foi cancelado. Fale com a equipe se precisar de ajuda.',
+    refunded: 'Este pagamento foi estornado. Entre em contato com a equipe para mais informações.',
+    charged_back: 'O pagamento foi contestado. Entre em contato com a equipe.',
+    pending: initialStatus === 'pending'
+      ? 'Pagamento pendente. Assim que o Mercado Pago confirmar, o status será atualizado.'
+      : initialStatus === 'failure'
+        ? 'O pagamento não foi concluído. Você pode tentar novamente no checkout.'
+        : 'Aguardando a confirmação do Mercado Pago. Esta página será atualizada automaticamente.',
+  };
+  let paymentStatus = 'pending';
+  let checkoutUrl = null;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      const response = await fetch(`${api}/payments/${encodeURIComponent(enrollmentId)}/status`, {
+        headers: { Accept: 'application/json' },
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Não foi possível consultar o pagamento.');
+      paymentStatus = result.payment.status;
+      checkoutUrl = result.payment.checkout_url;
+      message.textContent = statusMessages[paymentStatus] || statusMessages.pending;
+      if (paymentStatus !== 'pending') break;
+    } catch (error) {
+      message.textContent = error.message;
+      message.classList.add('form-feedback', 'is-error');
+      break;
+    }
+    if (attempt < 5) await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  if (paymentStatus !== 'approved' && checkoutUrl) {
+    const checkout = document.createElement('a');
+    checkout.className = 'button button-primary';
+    checkout.href = checkoutUrl;
+    checkout.textContent = 'Voltar ao checkout';
+    container.append(checkout);
+  }
+  const back = document.createElement('a');
+  back.className = 'button button-outline';
+  back.href = '/cursos.html';
+  back.textContent = 'Voltar ao site';
+  container.append(back);
 }
 
 async function loadBlogPreview() {
@@ -806,3 +873,4 @@ if (document.querySelector('[data-gallery-grid]')) loadGallery();
 if (document.querySelector('[data-blog-list]')) loadBlogList();
 if (document.querySelector('[data-blog-detail]')) loadBlogArticle();
 if (document.querySelector('[data-activity-detail]')) loadActivityDetail();
+if (document.querySelector('[data-payment-return]')) loadPaymentReturn();

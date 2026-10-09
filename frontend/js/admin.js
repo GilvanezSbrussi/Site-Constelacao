@@ -1132,6 +1132,12 @@ const settingDefinitions = [
   ['Usuário SMTP', 'smtpUser', 'text', { maxLength: 254 }],
   ['E-mail remetente', 'smtpFrom', 'email', { maxLength: 254 }],
   ['Senha SMTP (deixe em branco para manter a senha atual)', 'smtpPassword', 'password', { maxLength: 512, autocomplete: 'new-password', wide: true }],
+  ['Ativar pagamentos pelo Mercado Pago', 'paymentEnabled', 'checkbox', { wide: true }],
+  ['Ambiente Mercado Pago', 'paymentEnvironment', 'select', { choices: [['sandbox', 'Teste (sandbox)'], ['production', 'Produção']] }],
+  ['URL pública do site (HTTPS em produção)', 'paymentPublicUrl', 'url', { maxLength: 2000, placeholder: 'https://www.seusite.com.br', wide: true }],
+  ['Máximo de parcelas no checkout', 'paymentMaxInstallments', 'number', { min: 1, max: 12, step: 1 }],
+  ['Token de acesso Mercado Pago (deixe vazio para manter)', 'mercadoPagoAccessToken', 'password', { maxLength: 512, autocomplete: 'new-password', wide: true }],
+  ['Chave secreta do webhook (deixe vazio para manter)', 'mercadoPagoWebhookSecret', 'password', { maxLength: 512, autocomplete: 'new-password', wide: true }],
   ['Telefone', 'phone', 'tel', { maxLength: 30 }],
   ['WhatsApp', 'whatsappNumber', 'tel', { maxLength: 30 }],
   ['Mensagem padrão do WhatsApp', 'whatsappMessage', 'text', { maxLength: 300 }],
@@ -1238,6 +1244,14 @@ async function loadSettings() {
       ? 'Já existe uma senha salva; deixe vazio para preservá-la.'
       : 'Informe a senha da conta SMTP.';
     controls.get('smtpSecure').checked = Boolean(result.settings.smtpSecure);
+    controls.get('paymentEnabled').checked = Boolean(result.settings.paymentEnabled);
+    controls.get('paymentMaxInstallments').value = result.settings.paymentMaxInstallments ?? 1;
+    controls.get('mercadoPagoAccessToken').placeholder = result.settings.mercadoPagoAccessTokenConfigured
+      ? 'Já existe um token salvo; deixe vazio para preservá-lo.'
+      : 'Informe o token de acesso da aplicação Mercado Pago.';
+    controls.get('mercadoPagoWebhookSecret').placeholder = result.settings.mercadoPagoWebhookSecretConfigured
+      ? 'Já existe uma chave salva; deixe vazio para preservá-la.'
+      : 'Informe a chave secreta de assinatura do webhook.';
     addImageUpload(form, controls.get('bannerImageUrl'));
     const readSections = addOrderedSettings(form, 'Seções da página inicial (desative para ocultar)', homepageSectionItems, result.settings.homepageSections);
     const readMenu = addOrderedSettings(form, 'Itens do menu (ative, renomeie e defina a ordem)', menuItemDefaults, result.settings.menuItems, true);
@@ -1253,6 +1267,8 @@ async function loadSettings() {
       const settings = Object.fromEntries(new FormData(form));
       settings.smtpEnabled = controls.get('smtpEnabled').checked;
       settings.smtpSecure = controls.get('smtpSecure').checked;
+      settings.paymentEnabled = controls.get('paymentEnabled').checked;
+      settings.paymentMaxInstallments = controls.get('paymentMaxInstallments').value;
       settings.homepageSections = readSections();
       settings.menuItems = readMenu();
       save.disabled = true;
@@ -1267,7 +1283,7 @@ async function loadSettings() {
     });
     adminView.replaceChildren(
       setHeading('Configurações gerais', 'Identidade, contato, notificações e redes sociais do site.'),
-      node('p', 'settings-help wide', 'Configure aqui o servidor, porta, usuário, remetente e senha SMTP. A senha é armazenada criptografada usando o segredo JWT do servidor e nunca é exibida novamente. Deixe o campo de senha vazio para manter a senha atual. Modelos de e-mail aceitam {{name}}, {{email}}, {{phone}}, {{activity}}, {{type}}, {{date}} e {{siteName}}.'),
+      node('p', 'settings-help wide', 'Configure SMTP e Mercado Pago nesta tela. As credenciais são armazenadas criptografadas usando o segredo JWT do servidor e nunca são exibidas novamente; deixe os campos de segredo vazios para mantê-los. Para pagamentos, configure token de acesso, chave de assinatura do webhook e URL pública HTTPS. Cadastre no Mercado Pago o webhook em {URL pública}/api/v1/payments/webhook. O checkout hospedado oferece os meios disponíveis na conta Mercado Pago, incluindo Pix quando habilitado. O máximo de parcelas é configurado aqui. Modelos de e-mail aceitam {{name}}, {{email}}, {{phone}}, {{activity}}, {{type}}, {{date}} e {{siteName}}.'),
       form,
     );
   } catch (error) {
@@ -1669,6 +1685,25 @@ async function loadRecords(resource) {
       const detail = node('td');
       if (resource === 'enrollments') {
         detail.append(node('strong', '', record.activity_title || 'Atividade indisponível'), node('small', '', record.activity_type === 'course' ? 'Curso' : 'Evento'));
+        if (record.payment_status) {
+          const paymentLabels = {
+            pending: 'Pagamento pendente',
+            approved: 'Pagamento aprovado',
+            rejected: 'Pagamento recusado',
+            cancelled: 'Pagamento cancelado',
+            refunded: 'Pagamento estornado',
+            charged_back: 'Pagamento contestado',
+          };
+          const amount = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(record.payment_amount_cents / 100);
+          detail.append(node('small', '', `${paymentLabels[record.payment_status] || record.payment_status} · ${amount}`));
+          if (record.checkout_url && record.payment_status === 'pending') {
+            const checkout = node('a', 'text-link', 'Abrir checkout');
+            checkout.href = record.checkout_url;
+            checkout.target = '_blank';
+            checkout.rel = 'noreferrer';
+            detail.append(checkout);
+          }
+        }
       } else {
         detail.append(node('strong', '', record.subject));
         const disclosure = node('details', 'message-details');

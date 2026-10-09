@@ -407,10 +407,12 @@ function createAdminRouter({ db, config }) {
       const result = await db.query(`
         SELECT en.id, en.name, en.email, en.phone, en.city, en.state, en.observations, en.status, en.created_at,
                COALESCE(c.title, ev.title) AS activity_title,
-               CASE WHEN en.course_id IS NOT NULL THEN 'course' ELSE 'event' END AS activity_type
+               CASE WHEN en.course_id IS NOT NULL THEN 'course' ELSE 'event' END AS activity_type,
+               ep.status AS payment_status, ep.amount_cents AS payment_amount_cents, ep.checkout_url
         FROM enrollments en
         LEFT JOIN courses c ON c.id = en.course_id
         LEFT JOIN events ev ON ev.id = en.event_id
+        LEFT JOIN enrollment_payments ep ON ep.enrollment_id = en.id
         ORDER BY en.created_at DESC
       `);
       return response.json({ enrollments: result.rows });

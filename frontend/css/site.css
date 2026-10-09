@@ -436,6 +436,21 @@ img { display: block; max-width: 100%; }
   padding-block: 48px 96px;
 }
 
+.payment-return-page {
+  min-height: 60vh;
+  max-width: 760px;
+  padding-block: 96px;
+}
+
+.payment-return-page h1 {
+  margin: 12px 0 20px;
+  font-size: clamp(36px, 5vw, 56px);
+}
+
+.payment-return-page .button {
+  margin-top: 18px;
+}
+
 .detail-back {
   margin-bottom: 28px;
 }

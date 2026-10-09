@@ -2,6 +2,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const request = require('supertest');
 const { createApp } = require('../src/app');
+const { encryptPaymentSecret } = require('../src/services/mercado-pago-secrets');
+const jwtSecret = 'test-secret-with-at-least-thirty-two-characters';
 
 function makeApp(overrides = {}) {
   const db = {
@@ -13,9 +15,10 @@ function makeApp(overrides = {}) {
   return createApp({
     db,
     config: {
-      jwtSecret: 'test-secret-with-at-least-thirty-two-characters',
+      jwtSecret,
       setupToken: 'test-setup-token-with-more-than-24-chars',
       corsOrigins: ['http://localhost:5173'],
+      mercadoPagoFetchImpl: overrides.mercadoPagoFetchImpl,
     },
   });
 }
@@ -37,6 +40,7 @@ test('GET paginas publicas de artigos e detalhes estao disponiveis', async () =>
   const courses = await request(app).get('/cursos.html');
   const events = await request(app).get('/eventos.html');
   const contact = await request(app).get('/contato.html');
+  const payment = await request(app).get('/pagamento.html');
   const home = await request(app).get('/');
 
   assert.equal(blog.status, 200);
@@ -45,6 +49,8 @@ test('GET paginas publicas de artigos e detalhes estao disponiveis', async () =>
   assert.match(article.text, /data-blog-detail/);
   assert.equal(activity.status, 200);
   assert.match(activity.text, /data-activity-detail/);
+  assert.equal(payment.status, 200);
+  assert.match(payment.text, /data-payment-return/);
   for (const page of [courses, events, contact, home]) {
     assert.equal(page.status, 200);
     assert.match(page.text, /href="\/blog\.html"/);
@@ -181,28 +187,46 @@ test('POST /api/v1/enrollments reserva vaga sem exceder a capacidade', async () 
   const calls = [];
   const notifications = [];
   const app = makeApp({
+    async query(sql) {
+      if (sql.includes("status = 'enrollments_open'")) {
+        return {
+          rows: [{ id: 'course-id', title: 'Formacao', starts_at: '2026-11-10T12:00:00.000Z', price_cents: null, promotional_price_cents: null }],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes('FROM site_settings')) {
+        return {
+          rows: [
+            { key: 'site_name', value: 'Constelacao' },
+            { key: 'notification_admin_email', value: 'equipe@example.com' },
+            { key: 'enrollment_admin_subject', value: 'Nova inscricao: {{activity}}' },
+            { key: 'enrollment_admin_message', value: '{{name}} / {{email}} / {{activity}} / {{type}}' },
+            { key: 'enrollment_customer_subject', value: 'Recebemos: {{activity}}' },
+            { key: 'enrollment_customer_message', value: 'Ola {{name}}, {{siteName}} confirmou {{activity}}.' },
+          ],
+          rowCount: 6,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    },
     async connect() {
       return {
         async query(sql, values = []) {
           calls.push(sql.trim().split(/\s+/)[0]);
           if (sql.includes('UPDATE courses')) {
-            return { rows: [{ id: 'course-id', title: 'Formacao', starts_at: '2026-11-10T12:00:00.000Z' }], rowCount: 1 };
+            return {
+              rows: [{
+                id: 'course-id',
+                title: 'Formacao',
+                starts_at: '2026-11-10T12:00:00.000Z',
+                price_cents: null,
+                promotional_price_cents: null,
+              }],
+              rowCount: 1,
+            };
           }
           if (sql.includes('INSERT INTO enrollments')) {
-            return { rows: [{ id: 'enrollment-id', status: 'new' }], rowCount: 1 };
-          }
-          if (sql.includes('FROM site_settings')) {
-            return {
-              rows: [
-                { key: 'site_name', value: 'Constelacao' },
-                { key: 'notification_admin_email', value: 'equipe@example.com' },
-                { key: 'enrollment_admin_subject', value: 'Nova inscricao: {{activity}}' },
-                { key: 'enrollment_admin_message', value: '{{name}} / {{email}} / {{activity}} / {{type}}' },
-                { key: 'enrollment_customer_subject', value: 'Recebemos: {{activity}}' },
-                { key: 'enrollment_customer_message', value: 'Ola {{name}}, {{siteName}} confirmou {{activity}}.' },
-              ],
-              rowCount: 6,
-            };
+            return { rows: [{ id: values[0], status: 'new' }], rowCount: 1 };
           }
           if (sql.includes('INSERT INTO notification_outbox')) {
             notifications.push(values);
@@ -225,17 +249,121 @@ test('POST /api/v1/enrollments reserva vaga sem exceder a capacidade', async () 
     });
 
   assert.equal(response.status, 201);
-  assert.deepEqual(response.body.enrollment, { id: 'enrollment-id', status: 'new' });
-  assert.deepEqual(calls, ['BEGIN', 'UPDATE', 'INSERT', 'SELECT', 'INSERT', 'INSERT', 'COMMIT']);
+  assert.equal(response.body.enrollment.status, 'new');
+  assert.match(response.body.enrollment.id, /^[\da-f-]{36}$/i);
+  assert.deepEqual(calls, ['BEGIN', 'UPDATE', 'INSERT', 'INSERT', 'INSERT', 'COMMIT']);
   assert.deepEqual(notifications, [
     ['admin', 'equipe@example.com', 'Nova inscricao: Formacao', 'Ana Silva / ana@example.com / Formacao / Curso'],
     ['customer', 'ana@example.com', 'Recebemos: Formacao', 'Ola Ana Silva, Constelacao confirmou Formacao.'],
   ]);
 });
 
+test('POST /api/v1/enrollments cria checkout Mercado Pago com o valor promocional e reserva vaga', async () => {
+  const checkoutRequests = [];
+  const paymentInserts = [];
+  let transactionStarted = false;
+  const app = makeApp({
+    async query(sql) {
+      if (sql.includes("status = 'enrollments_open'")) {
+        return {
+          rows: [{
+            id: 'course-id',
+            title: 'Formacao',
+            starts_at: null,
+            price_cents: 150000,
+            promotional_price_cents: 125000,
+          }],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes('FROM site_settings')) {
+        return {
+          rows: [
+            { key: 'site_name', value: 'Constelacao' },
+            { key: 'payment_enabled', value: true },
+            { key: 'payment_access_token_encrypted', value: encryptPaymentSecret('TEST-token', jwtSecret, 'access-token') },
+            { key: 'payment_environment', value: 'sandbox' },
+            { key: 'payment_public_url', value: 'https://example.com' },
+            { key: 'payment_max_installments', value: 3 },
+          ],
+          rowCount: 6,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+    mercadoPagoFetchImpl: async (url, options) => {
+      assert.equal(transactionStarted, false);
+      checkoutRequests.push({ url, body: JSON.parse(options.body) });
+      return {
+        ok: true,
+        async json() {
+          return {
+            id: 'preference-id',
+            init_point: 'https://mercadopago.example/live',
+            sandbox_init_point: 'https://mercadopago.example/test',
+          };
+        },
+      };
+    },
+    async connect() {
+      transactionStarted = true;
+      return {
+        async query(sql, values = []) {
+          if (sql.includes('UPDATE courses')) {
+            return {
+              rows: [{
+                id: 'course-id',
+                title: 'Formacao',
+                starts_at: null,
+                price_cents: 150000,
+                promotional_price_cents: 125000,
+              }],
+              rowCount: 1,
+            };
+          }
+          if (sql.includes('INSERT INTO enrollments')) return { rows: [{ id: values[0], status: 'awaiting_payment' }], rowCount: 1 };
+          if (sql.includes('INSERT INTO enrollment_payments')) {
+            paymentInserts.push(values);
+            return { rows: [], rowCount: 1 };
+          }
+          return { rows: [], rowCount: 1 };
+        },
+        release() {},
+      };
+    },
+  });
+  const response = await request(app)
+    .post('/api/v1/enrollments')
+    .send({
+      courseId: '11111111-1111-4111-8111-111111111111',
+      name: 'Ana Silva',
+      email: 'ana@example.com',
+      phone: '47999999999',
+      privacyConsent: true,
+    });
+
+  assert.equal(response.status, 201, response.text);
+  assert.deepEqual(response.body.payment, { url: 'https://mercadopago.example/test' });
+  assert.equal(response.body.enrollment.status, 'awaiting_payment');
+  assert.equal(checkoutRequests.length, 1);
+  assert.equal(checkoutRequests[0].body.items[0].unit_price, 1250);
+  assert.equal(checkoutRequests[0].body.payment_methods.installments, 3);
+  assert.equal(checkoutRequests[0].body.external_reference, response.body.enrollment.id);
+  assert.deepEqual(paymentInserts[0], [response.body.enrollment.id, 'preference-id', 'https://mercadopago.example/test', 125000]);
+});
+
 test('POST /api/v1/enrollments encerra transacao quando nao ha vaga', async () => {
   const calls = [];
   const app = makeApp({
+    async query(sql) {
+      if (sql.includes("status = 'enrollments_open'")) {
+        return {
+          rows: [{ id: 'event-id', title: 'Encontro', starts_at: null, price_cents: null, promotional_price_cents: null }],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    },
     async connect() {
       return {
         async query(sql) {
