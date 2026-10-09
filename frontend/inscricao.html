@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f3f6f2" />
+    <meta name="description" content="Inscreva-se em um curso ou evento." />
+    <title>Inscrição | Constelação Familiar</title>
+    <link rel="preload" href="/fonts/manrope-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="/css/site.css" />
+    <script src="/js/site.js" defer></script>
+    <script src="/js/public.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#conteudo">Pular para o conteúdo</a>
+    <header class="site-header">
+      <a class="wordmark" href="/" aria-label="Constelação Familiar, início"><span class="wordmark-symbol" aria-hidden="true">C</span><span data-site-setting="siteName">Constelação Familiar</span></a>
+      <a class="nav-cta" href="/eventos.html">Voltar à agenda <span aria-hidden="true">↗</span></a>
+    </header>
+    <main id="conteudo" class="enrollment-page section-wrap">
+      <section class="enrollment-intro">
+        <p class="eyebrow"><span class="eyebrow-line"></span> Um lugar reservado para você</p>
+        <h1>Pedido de <em>inscrição.</em></h1>
+        <div class="selected-activity" data-selected-activity aria-live="polite"><p>Carregando informações...</p></div>
+      </section>
+      <form class="public-form" data-enrollment-form novalidate>
+        <div class="form-grid">
+          <label>Nome completo *<input name="name" autocomplete="name" required minlength="2" maxlength="120" /></label>
+          <label>E-mail *<input type="email" name="email" autocomplete="email" required maxlength="254" /></label>
+          <label>Telefone/WhatsApp *<input type="tel" name="phone" autocomplete="tel" required minlength="8" maxlength="30" /></label>
+          <label>Cidade<input name="city" autocomplete="address-level2" maxlength="100" /></label>
+          <label>Estado<input name="state" autocomplete="address-level1" maxlength="2" minlength="2" /></label>
+          <label class="form-wide">Observações<textarea name="observations" rows="4" maxlength="1000"></textarea></label>
+        </div>
+        <label class="consent-field"><input type="checkbox" name="privacyConsent" required /><span>Li e concordo com a <a href="/privacidade.html" target="_blank" rel="noreferrer">Política de Privacidade</a>.</span></label>
+        <div class="form-actions"><button class="button button-primary" type="submit">Enviar inscrição <span aria-hidden="true">↗</span></button><p class="form-status" role="status" aria-live="polite"></p></div>
+      </form>
+    </main>
+    <footer class="site-footer"><a class="wordmark footer-wordmark" href="/"><span class="wordmark-symbol" aria-hidden="true">C</span><span data-site-setting="siteName">Constelação Familiar</span></a><p data-site-setting="tagline">Um espaço de escuta e encontro.</p><a href="#conteudo" class="back-top">Voltar ao início <span aria-hidden="true">↑</span></a><small>© <span id="current-year"></span> <span data-site-setting="siteName">Constelação Familiar</span></small></footer>
+  </body>
+</html>

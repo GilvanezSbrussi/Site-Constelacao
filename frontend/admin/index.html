@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#183f35" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>Painel administrativo | Constelação Familiar</title>
+    <link rel="preload" href="/fonts/manrope-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="/css/admin.css" />
+    <script src="/js/admin.js" defer></script>
+  </head>
+  <body>
+    <main class="access-screen" data-access-screen>
+      <section class="access-intro">
+        <a class="admin-brand" href="/">
+          <span class="brand-symbol" aria-hidden="true">C</span>
+          <span>Constelação<span class="brand-light">Familiar</span></span>
+        </a>
+        <p class="eyebrow">Gestão do espaço</p>
+        <h1>Conteúdo em movimento.<br /><em>Cuidado em cada detalhe.</em></h1>
+        <p class="access-description">Organize cursos, encontros e conversas em um só lugar.</p>
+        <a class="back-public" href="/">Voltar ao site <span aria-hidden="true">↗</span></a>
+      </section>
+      <section class="access-panel" aria-labelledby="access-title">
+        <div class="access-form-wrap" data-login-view>
+          <p class="eyebrow">Área restrita</p>
+          <h2 id="access-title">Acesse seu painel</h2>
+          <form data-login-form>
+            <label>E-mail<input type="email" name="email" autocomplete="username" required maxlength="254" /></label>
+            <label>Senha<input type="password" name="password" autocomplete="current-password" required maxlength="128" /></label>
+            <button class="admin-button button-primary" type="submit">Entrar <span aria-hidden="true">↗</span></button>
+            <p class="access-feedback" data-login-feedback role="status" aria-live="polite"></p>
+          </form>
+          <button class="setup-toggle" type="button" data-show-setup>Primeiro acesso? Criar administrador</button>
+        </div>
+        <div class="access-form-wrap" data-setup-view hidden>
+          <p class="eyebrow">Configuração inicial</p>
+          <h2>Criar administrador</h2>
+          <p class="setup-description">Disponível somente antes da criação do primeiro usuário. O token está no arquivo local `.env`.</p>
+          <form data-setup-form>
+            <label>Nome<input name="name" autocomplete="name" required minlength="2" maxlength="120" /></label>
+            <label>E-mail<input type="email" name="email" autocomplete="email" required maxlength="254" /></label>
+            <label>Senha (mínimo de 12 caracteres)<input type="password" name="password" autocomplete="new-password" required minlength="12" maxlength="128" /></label>
+            <label>Token de configuração<input type="password" name="setupToken" autocomplete="off" required /></label>
+            <button class="admin-button button-primary" type="submit">Criar administrador</button>
+            <p class="access-feedback" data-setup-feedback role="status" aria-live="polite"></p>
+          </form>
+          <button class="setup-toggle" type="button" data-show-login>Voltar ao login</button>
+        </div>
+      </section>
+    </main>
+
+    <div class="admin-shell" data-admin-shell hidden>
+      <header class="admin-topbar">
+        <a class="admin-brand" href="/admin/" aria-label="Painel inicial"><span class="brand-symbol" aria-hidden="true">C</span><span>Constelação<span class="brand-light">Familiar</span></span></a>
+        <div class="topbar-actions"><span class="admin-user" data-admin-user></span><a class="public-link" href="/" target="_blank" rel="noreferrer">Ver site <span aria-hidden="true">↗</span></a><button class="logout-button" type="button" data-logout title="Sair do painel">Sair</button></div>
+      </header>
+      <div class="admin-layout">
+        <aside class="admin-sidebar">
+          <p class="sidebar-label">Painel administrativo</p>
+          <nav aria-label="Menu administrativo">
+            <button class="sidebar-link is-active" type="button" data-view="dashboard"><span aria-hidden="true">⌂</span> Visão geral</button>
+            <button class="sidebar-link" type="button" data-view="courses"><span aria-hidden="true">◫</span> Cursos</button>
+            <button class="sidebar-link" type="button" data-view="course-categories"><span aria-hidden="true">▦</span> Categorias de cursos</button>
+            <button class="sidebar-link" type="button" data-view="course-modules"><span aria-hidden="true">≡</span> Módulos de cursos</button>
+            <button class="sidebar-link" type="button" data-view="events"><span aria-hidden="true">◷</span> Eventos</button>
+            <button class="sidebar-link" type="button" data-view="instructors"><span aria-hidden="true">◉</span> Instrutores</button>
+            <button class="sidebar-link" type="button" data-view="blog"><span aria-hidden="true">✎</span> Blog</button>
+            <button class="sidebar-link" type="button" data-view="testimonials"><span aria-hidden="true">❝</span> Depoimentos</button>
+            <button class="sidebar-link" type="button" data-view="faqs"><span aria-hidden="true">?</span> FAQ</button>
+            <button class="sidebar-link" type="button" data-view="gallery"><span aria-hidden="true">▣</span> Galeria</button>
+            <button class="sidebar-link" type="button" data-view="enrollments"><span aria-hidden="true">≋</span> Inscrições</button>
+            <button class="sidebar-link" type="button" data-view="contacts"><span aria-hidden="true">✉</span> Contatos</button>
+            <button class="sidebar-link" type="button" data-view="settings"><span aria-hidden="true">⚙</span> Configurações</button>
+            <button class="sidebar-link" type="button" data-view="users"><span aria-hidden="true">♙</span> Usuários</button>
+          </nav>
+          <div class="sidebar-bottom"><a href="/" class="back-public">Abrir site público <span aria-hidden="true">↗</span></a></div>
+        </aside>
+        <main class="admin-main">
+          <p class="admin-notice" data-admin-notice role="status" aria-live="polite"></p>
+          <section class="admin-view" data-admin-view></section>
+        </main>
+      </div>
+    </div>
+  </body>
+</html>
